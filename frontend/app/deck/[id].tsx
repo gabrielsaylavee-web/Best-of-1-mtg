@@ -56,6 +56,19 @@ interface WildcardCost {
   common: number;
 }
 
+interface MatchupInfo {
+  opponent_deck: string;
+  opponent_archetype: string;
+  win_rate: number;
+  result: string;
+}
+
+interface MatchupsResponse {
+  deck_name: string;
+  deck_archetype: string;
+  matchups: MatchupInfo[];
+}
+
 interface Deck {
   id: string;
   name: string;
@@ -105,9 +118,20 @@ const RARITY_COLORS: Record<string, string> = {
   common: '#1A1A1A',
 };
 
-// API function
+const MATCHUP_COLORS = {
+  favored: '#4CAF50',
+  even: '#FFC107',
+  unfavored: '#F44336',
+};
+
+// API functions
 const fetchDeck = async (id: string): Promise<Deck> => {
   const response = await axios.get(`${API_URL}/api/decks/${id}`);
+  return response.data;
+};
+
+const fetchMatchups = async (id: string): Promise<MatchupsResponse> => {
+  const response = await axios.get(`${API_URL}/api/decks/${id}/matchups`);
   return response.data;
 };
 
@@ -180,17 +204,43 @@ const SectionHeader = ({ title, icon }: { title: string; icon: string }) => (
   </View>
 );
 
+// Matchup Row Component
+const MatchupRow = ({ matchup }: { matchup: MatchupInfo }) => {
+  const resultColor = MATCHUP_COLORS[matchup.result as keyof typeof MATCHUP_COLORS] || MATCHUP_COLORS.even;
+  const resultIcon = matchup.result === 'favored' ? 'arrow-up' : matchup.result === 'unfavored' ? 'arrow-down' : 'remove';
+  
+  return (
+    <View style={styles.matchupRow}>
+      <View style={styles.matchupInfo}>
+        <Text style={styles.matchupDeckName} numberOfLines={1}>{matchup.opponent_deck}</Text>
+        <Text style={styles.matchupArchetype}>{matchup.opponent_archetype}</Text>
+      </View>
+      <View style={[styles.matchupResult, { backgroundColor: resultColor }]}>
+        <Ionicons name={resultIcon} size={14} color="#fff" />
+        <Text style={styles.matchupWinRate}>{matchup.win_rate.toFixed(0)}%</Text>
+      </View>
+    </View>
+  );
+};
+
 // Main Component
 export default function DeckDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [copying, setCopying] = useState(false);
+  const [activeTab, setActiveTab] = useState<'cards' | 'matchups'>('cards');
   
   const { data: deck, isLoading, error } = useQuery({
     queryKey: ['deck', id],
     queryFn: () => fetchDeck(id!),
     enabled: !!id,
+  });
+  
+  const { data: matchupsData, isLoading: matchupsLoading } = useQuery({
+    queryKey: ['matchups', id],
+    queryFn: () => fetchMatchups(id!),
+    enabled: !!id && activeTab === 'matchups',
   });
   
   const handleCopyToArena = useCallback(async () => {
@@ -251,6 +301,11 @@ export default function DeckDetailScreen() {
     deck.wildcard_cost.rare +
     deck.wildcard_cost.uncommon +
     deck.wildcard_cost.common;
+  
+  // Categorize matchups
+  const favoredMatchups = matchupsData?.matchups.filter(m => m.result === 'favored') || [];
+  const evenMatchups = matchupsData?.matchups.filter(m => m.result === 'even') || [];
+  const unfavoredMatchups = matchupsData?.matchups.filter(m => m.result === 'unfavored') || [];
   
   return (
     <View style={[styles.container, { paddingBottom: insets.bottom }]}>
@@ -314,68 +369,148 @@ export default function DeckDetailScreen() {
           )}
         </View>
         
-        {/* Wildcard Cost */}
-        <View style={styles.section}>
-          <SectionHeader title="Wildcard Cost" icon="diamond" />
-          <View style={styles.wildcardGrid}>
-            <View style={styles.wildcardBox}>
-              <View style={[styles.wildcardIcon, { backgroundColor: '#FF6B00' }]} />
-              <Text style={styles.wildcardValue}>{deck.wildcard_cost.mythic}</Text>
-              <Text style={styles.wildcardLabel}>Mythic</Text>
-            </View>
-            <View style={styles.wildcardBox}>
-              <View style={[styles.wildcardIcon, { backgroundColor: '#FFD700' }]} />
-              <Text style={styles.wildcardValue}>{deck.wildcard_cost.rare}</Text>
-              <Text style={styles.wildcardLabel}>Rare</Text>
-            </View>
-            <View style={styles.wildcardBox}>
-              <View style={[styles.wildcardIcon, { backgroundColor: '#C0C0C0' }]} />
-              <Text style={styles.wildcardValue}>{deck.wildcard_cost.uncommon}</Text>
-              <Text style={styles.wildcardLabel}>Uncommon</Text>
-            </View>
-            <View style={styles.wildcardBox}>
-              <View style={[styles.wildcardIcon, { backgroundColor: '#666' }]} />
-              <Text style={styles.wildcardValue}>{deck.wildcard_cost.common}</Text>
-              <Text style={styles.wildcardLabel}>Common</Text>
-            </View>
-          </View>
-          <Text style={styles.totalWildcards}>Total: {totalWildcards} wildcards</Text>
+        {/* Tab Switcher */}
+        <View style={styles.tabContainer}>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'cards' && styles.activeTab]}
+            onPress={() => setActiveTab('cards')}
+          >
+            <Ionicons name="albums" size={18} color={activeTab === 'cards' ? '#6366F1' : '#888'} />
+            <Text style={[styles.tabText, activeTab === 'cards' && styles.activeTabText]}>Cards</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'matchups' && styles.activeTab]}
+            onPress={() => setActiveTab('matchups')}
+          >
+            <Ionicons name="git-compare" size={18} color={activeTab === 'matchups' ? '#6366F1' : '#888'} />
+            <Text style={[styles.tabText, activeTab === 'matchups' && styles.activeTabText]}>Matchups</Text>
+          </TouchableOpacity>
         </View>
         
-        {/* Mana Curve */}
-        <View style={styles.section}>
-          <SectionHeader title="Mana Curve" icon="bar-chart" />
-          <View style={styles.curveContainer}>
-            <ManaCurveBar value={deck.mana_curve.zero} maxValue={maxCurveValue} label="0" />
-            <ManaCurveBar value={deck.mana_curve.one} maxValue={maxCurveValue} label="1" />
-            <ManaCurveBar value={deck.mana_curve.two} maxValue={maxCurveValue} label="2" />
-            <ManaCurveBar value={deck.mana_curve.three} maxValue={maxCurveValue} label="3" />
-            <ManaCurveBar value={deck.mana_curve.four} maxValue={maxCurveValue} label="4" />
-            <ManaCurveBar value={deck.mana_curve.five} maxValue={maxCurveValue} label="5" />
-            <ManaCurveBar value={deck.mana_curve.six_plus} maxValue={maxCurveValue} label="6+" />
-          </View>
-        </View>
-        
-        {/* Main Deck */}
-        <View style={styles.section}>
-          <SectionHeader title={`Main Deck (${deck.main_deck.reduce((sum, c) => sum + c.quantity, 0)} cards)`} icon="albums" />
-          <View style={styles.cardList}>
-            {deck.main_deck.map((card, index) => (
-              <CardRow key={`${card.name}-${index}`} card={card} />
-            ))}
-          </View>
-        </View>
-        
-        {/* Sideboard */}
-        {deck.sideboard.length > 0 && (
-          <View style={styles.section}>
-            <SectionHeader title={`Sideboard (${deck.sideboard.reduce((sum, c) => sum + c.quantity, 0)} cards)`} icon="copy" />
-            <View style={styles.cardList}>
-              {deck.sideboard.map((card, index) => (
-                <CardRow key={`sb-${card.name}-${index}`} card={card} />
-              ))}
+        {activeTab === 'cards' ? (
+          <>
+            {/* Wildcard Cost */}
+            <View style={styles.section}>
+              <SectionHeader title="Wildcard Cost" icon="diamond" />
+              <View style={styles.wildcardGrid}>
+                <View style={styles.wildcardBox}>
+                  <View style={[styles.wildcardIcon, { backgroundColor: '#FF6B00' }]} />
+                  <Text style={styles.wildcardValue}>{deck.wildcard_cost.mythic}</Text>
+                  <Text style={styles.wildcardLabel}>Mythic</Text>
+                </View>
+                <View style={styles.wildcardBox}>
+                  <View style={[styles.wildcardIcon, { backgroundColor: '#FFD700' }]} />
+                  <Text style={styles.wildcardValue}>{deck.wildcard_cost.rare}</Text>
+                  <Text style={styles.wildcardLabel}>Rare</Text>
+                </View>
+                <View style={styles.wildcardBox}>
+                  <View style={[styles.wildcardIcon, { backgroundColor: '#C0C0C0' }]} />
+                  <Text style={styles.wildcardValue}>{deck.wildcard_cost.uncommon}</Text>
+                  <Text style={styles.wildcardLabel}>Uncommon</Text>
+                </View>
+                <View style={styles.wildcardBox}>
+                  <View style={[styles.wildcardIcon, { backgroundColor: '#666' }]} />
+                  <Text style={styles.wildcardValue}>{deck.wildcard_cost.common}</Text>
+                  <Text style={styles.wildcardLabel}>Common</Text>
+                </View>
+              </View>
+              <Text style={styles.totalWildcards}>Total: {totalWildcards} wildcards</Text>
             </View>
-          </View>
+            
+            {/* Mana Curve */}
+            <View style={styles.section}>
+              <SectionHeader title="Mana Curve" icon="bar-chart" />
+              <View style={styles.curveContainer}>
+                <ManaCurveBar value={deck.mana_curve.zero} maxValue={maxCurveValue} label="0" />
+                <ManaCurveBar value={deck.mana_curve.one} maxValue={maxCurveValue} label="1" />
+                <ManaCurveBar value={deck.mana_curve.two} maxValue={maxCurveValue} label="2" />
+                <ManaCurveBar value={deck.mana_curve.three} maxValue={maxCurveValue} label="3" />
+                <ManaCurveBar value={deck.mana_curve.four} maxValue={maxCurveValue} label="4" />
+                <ManaCurveBar value={deck.mana_curve.five} maxValue={maxCurveValue} label="5" />
+                <ManaCurveBar value={deck.mana_curve.six_plus} maxValue={maxCurveValue} label="6+" />
+              </View>
+            </View>
+            
+            {/* Main Deck */}
+            <View style={styles.section}>
+              <SectionHeader title={`Main Deck (${deck.main_deck.reduce((sum, c) => sum + c.quantity, 0)} cards)`} icon="albums" />
+              <View style={styles.cardList}>
+                {deck.main_deck.map((card, index) => (
+                  <CardRow key={`${card.name}-${index}`} card={card} />
+                ))}
+              </View>
+            </View>
+            
+            {/* Sideboard */}
+            {deck.sideboard.length > 0 && (
+              <View style={styles.section}>
+                <SectionHeader title={`Sideboard (${deck.sideboard.reduce((sum, c) => sum + c.quantity, 0)} cards)`} icon="copy" />
+                <View style={styles.cardList}>
+                  {deck.sideboard.map((card, index) => (
+                    <CardRow key={`sb-${card.name}-${index}`} card={card} />
+                  ))}
+                </View>
+              </View>
+            )}
+          </>
+        ) : (
+          <>
+            {/* Matchups Tab */}
+            {matchupsLoading ? (
+              <View style={[styles.section, styles.centerContent]}>
+                <ActivityIndicator size="small" color="#6366F1" />
+                <Text style={styles.loadingText}>Loading matchups...</Text>
+              </View>
+            ) : (
+              <>
+                {/* Favored Matchups */}
+                {favoredMatchups.length > 0 && (
+                  <View style={styles.section}>
+                    <View style={styles.matchupHeader}>
+                      <Ionicons name="arrow-up-circle" size={20} color="#4CAF50" />
+                      <Text style={[styles.sectionTitle, { color: '#4CAF50' }]}>Good Against</Text>
+                    </View>
+                    {favoredMatchups.map((matchup, index) => (
+                      <MatchupRow key={`fav-${index}`} matchup={matchup} />
+                    ))}
+                  </View>
+                )}
+                
+                {/* Even Matchups */}
+                {evenMatchups.length > 0 && (
+                  <View style={styles.section}>
+                    <View style={styles.matchupHeader}>
+                      <Ionicons name="remove-circle" size={20} color="#FFC107" />
+                      <Text style={[styles.sectionTitle, { color: '#FFC107' }]}>Even Matchups</Text>
+                    </View>
+                    {evenMatchups.map((matchup, index) => (
+                      <MatchupRow key={`even-${index}`} matchup={matchup} />
+                    ))}
+                  </View>
+                )}
+                
+                {/* Unfavored Matchups */}
+                {unfavoredMatchups.length > 0 && (
+                  <View style={styles.section}>
+                    <View style={styles.matchupHeader}>
+                      <Ionicons name="arrow-down-circle" size={20} color="#F44336" />
+                      <Text style={[styles.sectionTitle, { color: '#F44336' }]}>Bad Against</Text>
+                    </View>
+                    {unfavoredMatchups.map((matchup, index) => (
+                      <MatchupRow key={`unfav-${index}`} matchup={matchup} />
+                    ))}
+                  </View>
+                )}
+                
+                {!favoredMatchups.length && !evenMatchups.length && !unfavoredMatchups.length && (
+                  <View style={[styles.section, styles.centerContent]}>
+                    <Ionicons name="analytics" size={48} color="#666" />
+                    <Text style={styles.emptyText}>No matchup data available</Text>
+                  </View>
+                )}
+              </>
+            )}
+          </>
         )}
         
         {/* Source Info */}
@@ -499,6 +634,34 @@ const styles = StyleSheet.create({
     fontSize: 32,
     fontWeight: 'bold',
   },
+  tabContainer: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    marginBottom: 16,
+    backgroundColor: '#1a1a2e',
+    borderRadius: 12,
+    padding: 4,
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  activeTab: {
+    backgroundColor: '#2a2a40',
+  },
+  tabText: {
+    color: '#888',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 6,
+  },
+  activeTabText: {
+    color: '#6366F1',
+  },
   section: {
     backgroundColor: '#1a1a2e',
     marginHorizontal: 16,
@@ -611,6 +774,46 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     marginLeft: 8,
   },
+  matchupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  matchupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#2a2a40',
+  },
+  matchupInfo: {
+    flex: 1,
+  },
+  matchupDeckName: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  matchupArchetype: {
+    color: '#888',
+    fontSize: 12,
+    textTransform: 'capitalize',
+    marginTop: 2,
+  },
+  matchupResult: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  matchupWinRate: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginLeft: 4,
+  },
   sourceInfo: {
     alignItems: 'center',
     padding: 16,
@@ -669,5 +872,10 @@ const styles = StyleSheet.create({
   retryButtonText: {
     color: '#fff',
     fontWeight: 'bold',
+  },
+  emptyText: {
+    color: '#888',
+    fontSize: 14,
+    marginTop: 12,
   },
 });
