@@ -15,6 +15,9 @@ import asyncio
 import re
 import json
 import random
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -29,6 +32,9 @@ app = FastAPI()
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
+
+# Initialize scheduler
+scheduler = AsyncIOScheduler()
 
 # Configure logging
 logging.basicConfig(
@@ -1491,6 +1497,130 @@ async def get_stats():
         "last_scrape": scraper.scrape_results.get('last_updated')
     }
 
+# Scheduled job functions
+async def scheduled_scrape_job():
+    """Scheduled job to scrape decks from all sources"""
+    logger.info("🕐 Running scheduled deck scraping job...")
+    try:
+        await scrape_and_update_decks()
+        logger.info("✅ Scheduled scraping job completed successfully")
+    except Exception as e:
+        logger.error(f"❌ Scheduled scraping job failed: {e}")
+
+async def scheduled_meta_detection_job():
+    """Scheduled job to detect meta changes"""
+    logger.info("🕐 Running scheduled meta change detection job...")
+    try:
+        await detect_meta_changes()
+        logger.info("✅ Scheduled meta detection job completed successfully")
+    except Exception as e:
+        logger.error(f"❌ Scheduled meta detection job failed: {e}")
+
+# Scheduler status model
+class SchedulerStatus(BaseModel):
+    running: bool
+    jobs: List[Dict[str, Any]]
+    next_scrape: Optional[str] = None
+    next_meta_check: Optional[str] = None
+
+class JobConfig(BaseModel):
+    scrape_interval_hours: int = 6
+    meta_check_interval_hours: int = 1
+    enabled: bool = True
+
+# Scheduler endpoints
+@api_router.get("/scheduler/status", response_model=SchedulerStatus)
+async def get_scheduler_status():
+    """Get scheduler status and upcoming jobs"""
+    jobs = []
+    next_scrape = None
+    next_meta_check = None
+    
+    for job in scheduler.get_jobs():
+        job_info = {
+            "id": job.id,
+            "name": job.name,
+            "next_run": str(job.next_run_time) if job.next_run_time else None,
+            "trigger": str(job.trigger)
+        }
+        jobs.append(job_info)
+        
+        if "scrape" in job.id:
+            next_scrape = str(job.next_run_time) if job.next_run_time else None
+        elif "meta" in job.id:
+            next_meta_check = str(job.next_run_time) if job.next_run_time else None
+    
+    return SchedulerStatus(
+        running=scheduler.running,
+        jobs=jobs,
+        next_scrape=next_scrape,
+        next_meta_check=next_meta_check
+    )
+
+@api_router.post("/scheduler/configure")
+async def configure_scheduler(config: JobConfig):
+    """Configure scheduler job intervals"""
+    try:
+        # Remove existing jobs
+        if scheduler.get_job("deck_scrape_job"):
+            scheduler.remove_job("deck_scrape_job")
+        if scheduler.get_job("meta_detection_job"):
+            scheduler.remove_job("meta_detection_job")
+        
+        if config.enabled:
+            # Add deck scraping job (every N hours)
+            scheduler.add_job(
+                scheduled_scrape_job,
+                trigger=IntervalTrigger(hours=config.scrape_interval_hours),
+                id="deck_scrape_job",
+                name="Deck Scraping Job",
+                replace_existing=True
+            )
+            
+            # Add meta detection job (every N hours)
+            scheduler.add_job(
+                scheduled_meta_detection_job,
+                trigger=IntervalTrigger(hours=config.meta_check_interval_hours),
+                id="meta_detection_job",
+                name="Meta Change Detection Job",
+                replace_existing=True
+            )
+            
+            logger.info(f"Scheduler configured: Scraping every {config.scrape_interval_hours}h, Meta check every {config.meta_check_interval_hours}h")
+        
+        return {
+            "message": "Scheduler configured successfully",
+            "scrape_interval_hours": config.scrape_interval_hours,
+            "meta_check_interval_hours": config.meta_check_interval_hours,
+            "enabled": config.enabled
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to configure scheduler: {str(e)}")
+
+@api_router.post("/scheduler/run-now/{job_type}")
+async def run_job_now(job_type: str, background_tasks: BackgroundTasks):
+    """Manually trigger a scheduled job immediately"""
+    if job_type == "scrape":
+        background_tasks.add_task(scheduled_scrape_job)
+        return {"message": "Scraping job triggered", "job_type": job_type}
+    elif job_type == "meta":
+        background_tasks.add_task(scheduled_meta_detection_job)
+        return {"message": "Meta detection job triggered", "job_type": job_type}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid job type. Use 'scrape' or 'meta'")
+
+@api_router.post("/scheduler/pause")
+async def pause_scheduler():
+    """Pause all scheduled jobs"""
+    scheduler.pause()
+    return {"message": "Scheduler paused", "running": scheduler.running}
+
+@api_router.post("/scheduler/resume")
+async def resume_scheduler():
+    """Resume all scheduled jobs"""
+    scheduler.resume()
+    return {"message": "Scheduler resumed", "running": scheduler.running}
+
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -1504,9 +1634,35 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database with sample decks on startup"""
+    """Initialize database with sample decks and start scheduler"""
     await seed_sample_decks()
+    
+    # Configure default scheduled jobs
+    # Scrape decks every 6 hours
+    scheduler.add_job(
+        scheduled_scrape_job,
+        trigger=IntervalTrigger(hours=6),
+        id="deck_scrape_job",
+        name="Deck Scraping Job",
+        replace_existing=True
+    )
+    
+    # Check for meta changes every 1 hour
+    scheduler.add_job(
+        scheduled_meta_detection_job,
+        trigger=IntervalTrigger(hours=1),
+        id="meta_detection_job",
+        name="Meta Change Detection Job",
+        replace_existing=True
+    )
+    
+    # Start the scheduler
+    scheduler.start()
+    logger.info("📅 Scheduler started with jobs: Scraping (every 6h), Meta Detection (every 1h)")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    """Cleanup on shutdown"""
+    scheduler.shutdown(wait=False)
     client.close()
+    logger.info("Scheduler and database connections closed")
