@@ -49,6 +49,18 @@ interface ColorDistribution {
   colorless: number;
 }
 
+interface SimilarDeck {
+  id: string;
+  name: string;
+  colors: string[];
+  color_name: string;
+  archetype: string;
+  win_rate: number | null;
+  similarity_score: number;
+  shared_cards: string[];
+  reason: string;
+}
+
 interface WildcardCost {
   mythic: number;
   rare: number;
@@ -132,6 +144,11 @@ const fetchDeck = async (id: string): Promise<Deck> => {
 
 const fetchMatchups = async (id: string): Promise<MatchupsResponse> => {
   const response = await axios.get(`${API_URL}/api/decks/${id}/matchups`);
+  return response.data;
+};
+
+const fetchSimilarDecks = async (id: string): Promise<SimilarDeck[]> => {
+  const response = await axios.get(`${API_URL}/api/decks/${id}/similar`);
   return response.data;
 };
 
@@ -229,7 +246,7 @@ export default function DeckDetailScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [copying, setCopying] = useState(false);
-  const [activeTab, setActiveTab] = useState<'cards' | 'matchups'>('cards');
+  const [activeTab, setActiveTab] = useState<'cards' | 'matchups' | 'similar'>('cards');
   
   const { data: deck, isLoading, error } = useQuery({
     queryKey: ['deck', id],
@@ -241,6 +258,12 @@ export default function DeckDetailScreen() {
     queryKey: ['matchups', id],
     queryFn: () => fetchMatchups(id!),
     enabled: !!id && activeTab === 'matchups',
+  });
+
+  const { data: similarDecks, isLoading: similarLoading } = useQuery({
+    queryKey: ['similar', id],
+    queryFn: () => fetchSimilarDecks(id!),
+    enabled: !!id && activeTab === 'similar',
   });
   
   const handleCopyToArena = useCallback(async () => {
@@ -263,6 +286,10 @@ export default function DeckDetailScreen() {
       setCopying(false);
     }
   }, [deck]);
+
+  const handleSimilarDeckPress = useCallback((deckId: string) => {
+    router.push(`/deck/${deckId}`);
+  }, [router]);
   
   if (isLoading) {
     return (
@@ -385,6 +412,13 @@ export default function DeckDetailScreen() {
             <Ionicons name="git-compare" size={18} color={activeTab === 'matchups' ? '#6366F1' : '#888'} />
             <Text style={[styles.tabText, activeTab === 'matchups' && styles.activeTabText]}>Matchups</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'similar' && styles.activeTab]}
+            onPress={() => setActiveTab('similar')}
+          >
+            <Ionicons name="layers" size={18} color={activeTab === 'similar' ? '#6366F1' : '#888'} />
+            <Text style={[styles.tabText, activeTab === 'similar' && styles.activeTabText]}>Similar</Text>
+          </TouchableOpacity>
         </View>
         
         {activeTab === 'cards' ? (
@@ -453,7 +487,9 @@ export default function DeckDetailScreen() {
               </View>
             )}
           </>
-        ) : (
+        ) : null}
+
+        {activeTab === 'matchups' && (
           <>
             {/* Matchups Tab */}
             {matchupsLoading ? (
@@ -506,6 +542,76 @@ export default function DeckDetailScreen() {
                   <View style={[styles.section, styles.centerContent]}>
                     <Ionicons name="analytics" size={48} color="#666" />
                     <Text style={styles.emptyText}>No matchup data available</Text>
+                  </View>
+                )}
+              </>
+            )}
+          </>
+        )}
+
+        {activeTab === 'similar' && (
+          <>
+            {/* Similar Decks Tab */}
+            {similarLoading ? (
+              <View style={[styles.section, styles.centerContent]}>
+                <ActivityIndicator size="small" color="#6366F1" />
+                <Text style={styles.loadingText}>Finding similar decks...</Text>
+              </View>
+            ) : (
+              <>
+                {similarDecks && similarDecks.length > 0 ? (
+                  <View style={styles.section}>
+                    <View style={styles.matchupHeader}>
+                      <Ionicons name="layers" size={20} color="#6366F1" />
+                      <Text style={[styles.sectionTitle, { color: '#6366F1' }]}>
+                        Similar Decks ({similarDecks.length})
+                      </Text>
+                    </View>
+                    {similarDecks.map((similar, index) => (
+                      <TouchableOpacity
+                        key={`similar-${index}`}
+                        style={styles.similarDeckCard}
+                        onPress={() => handleSimilarDeckPress(similar.id)}
+                      >
+                        <View style={styles.similarDeckHeader}>
+                          <View style={styles.manaRowSmall}>
+                            {similar.colors.map((c, i) => (
+                              <ManaSymbol key={`sim-${c}-${i}`} color={c} size={20} />
+                            ))}
+                          </View>
+                          <View style={styles.similarityBadge}>
+                            <Text style={styles.similarityText}>
+                              {similar.similarity_score.toFixed(0)}% match
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={styles.similarDeckName}>{similar.name}</Text>
+                        <Text style={styles.similarDeckMeta}>
+                          {similar.color_name} • {similar.archetype}
+                          {similar.win_rate ? ` • ${similar.win_rate.toFixed(1)}% WR` : ''}
+                        </Text>
+                        <Text style={styles.similarReason}>{similar.reason}</Text>
+                        {similar.shared_cards.length > 0 && (
+                          <View style={styles.sharedCardsContainer}>
+                            <Text style={styles.sharedCardsLabel}>Shared cards:</Text>
+                            <Text style={styles.sharedCardsList} numberOfLines={2}>
+                              {similar.shared_cards.slice(0, 5).join(', ')}
+                              {similar.shared_cards.length > 5 ? ` +${similar.shared_cards.length - 5} more` : ''}
+                            </Text>
+                          </View>
+                        )}
+                        <View style={styles.viewDeckRow}>
+                          <Text style={styles.viewDeckText}>View deck</Text>
+                          <Ionicons name="chevron-forward" size={16} color="#6366F1" />
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ) : (
+                  <View style={[styles.section, styles.centerContent]}>
+                    <Ionicons name="layers-outline" size={48} color="#666" />
+                    <Text style={styles.emptyText}>No similar decks found</Text>
+                    <Text style={styles.emptySubtext}>This deck has a unique strategy!</Text>
                   </View>
                 )}
               </>
@@ -877,5 +983,84 @@ const styles = StyleSheet.create({
     color: '#888',
     fontSize: 14,
     marginTop: 12,
+  },
+  emptySubtext: {
+    color: '#666',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  manaRowSmall: {
+    flexDirection: 'row',
+  },
+  similarDeckCard: {
+    backgroundColor: '#0f0f1a',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#2a2a40',
+  },
+  similarDeckHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  similarityBadge: {
+    backgroundColor: '#6366F1',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  similarityText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  similarDeckName: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  similarDeckMeta: {
+    color: '#888',
+    fontSize: 13,
+    marginBottom: 8,
+    textTransform: 'capitalize',
+  },
+  similarReason: {
+    color: '#aaa',
+    fontSize: 12,
+    fontStyle: 'italic',
+    marginBottom: 8,
+  },
+  sharedCardsContainer: {
+    backgroundColor: '#1a1a2e',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 8,
+  },
+  sharedCardsLabel: {
+    color: '#6366F1',
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  sharedCardsList: {
+    color: '#ccc',
+    fontSize: 12,
+    textTransform: 'capitalize',
+  },
+  viewDeckRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+  },
+  viewDeckText: {
+    color: '#6366F1',
+    fontSize: 13,
+    fontWeight: '600',
+    marginRight: 4,
   },
 });

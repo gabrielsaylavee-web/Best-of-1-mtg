@@ -194,6 +194,36 @@ class ScrapingStatus(BaseModel):
     decks_found: int
     last_updated: Optional[datetime]
 
+class SimilarDeck(BaseModel):
+    id: str
+    name: str
+    colors: List[str]
+    color_name: str
+    archetype: str
+    win_rate: Optional[float]
+    similarity_score: float  # 0-100 percentage
+    shared_cards: List[str]
+    reason: str
+
+class NotificationPreferences(BaseModel):
+    user_id: str
+    push_token: Optional[str] = None
+    enabled: bool = True
+    meta_changes: bool = True  # Notify on win rate changes
+    new_decks: bool = True  # Notify on new top tier decks
+    favorite_archetypes: List[str] = []  # Only notify for these archetypes
+    min_win_rate: float = 55.0  # Only notify for decks above this WR
+
+class MetaAlert(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    alert_type: str  # "new_deck", "win_rate_change", "tier_change"
+    deck_id: str
+    deck_name: str
+    message: str
+    details: Dict[str, Any] = {}
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    read: bool = False
+
 # Utility functions
 def get_color_name(colors: List[str]) -> str:
     """Convert color combination to guild/shard name"""
@@ -1154,6 +1184,284 @@ async def scrape_and_update_decks():
     except Exception as e:
         logger.error(f"Error during deck scraping: {e}")
         scraper.scrape_results['status'] = 'error'
+
+# Similarity calculation function
+def calculate_deck_similarity(deck1_cards: List[Dict], deck2_cards: List[Dict], 
+                               deck1_colors: List[str], deck2_colors: List[str],
+                               deck1_archetype: str, deck2_archetype: str) -> Dict:
+    """Calculate similarity between two decks"""
+    
+    # Get card names
+    deck1_card_names = {card.get('name', '').lower() for card in deck1_cards}
+    deck2_card_names = {card.get('name', '').lower() for card in deck2_cards}
+    
+    # Remove basic lands from comparison
+    basic_lands = {'mountain', 'plains', 'island', 'swamp', 'forest'}
+    deck1_card_names -= basic_lands
+    deck2_card_names -= basic_lands
+    
+    # Calculate card overlap
+    shared_cards = deck1_card_names & deck2_card_names
+    total_unique_cards = deck1_card_names | deck2_card_names
+    
+    card_similarity = (len(shared_cards) / len(total_unique_cards) * 100) if total_unique_cards else 0
+    
+    # Calculate color similarity
+    color_overlap = set(deck1_colors) & set(deck2_colors)
+    color_union = set(deck1_colors) | set(deck2_colors)
+    color_similarity = (len(color_overlap) / len(color_union) * 100) if color_union else 0
+    
+    # Archetype similarity
+    archetype_similarity = 100 if deck1_archetype == deck2_archetype else 30
+    
+    # Weighted average
+    overall_similarity = (card_similarity * 0.6) + (color_similarity * 0.25) + (archetype_similarity * 0.15)
+    
+    # Determine reason
+    reasons = []
+    if card_similarity > 50:
+        reasons.append(f"Shares {len(shared_cards)} non-land cards")
+    if color_overlap:
+        reasons.append(f"Same colors: {', '.join(sorted(color_overlap))}")
+    if deck1_archetype == deck2_archetype:
+        reasons.append(f"Same archetype: {deck1_archetype}")
+    
+    return {
+        'similarity_score': round(overall_similarity, 1),
+        'shared_cards': list(shared_cards)[:10],  # Limit to top 10
+        'reason': '. '.join(reasons) if reasons else 'Similar deck strategy'
+    }
+
+@api_router.get("/decks/{deck_id}/similar", response_model=List[SimilarDeck])
+async def get_similar_decks(deck_id: str, limit: int = Query(5, ge=1, le=10)):
+    """Get similar decks to a given deck"""
+    deck = await db.decks.find_one({"id": deck_id})
+    
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck not found")
+    
+    # Get all other decks
+    all_decks = await db.decks.find({"id": {"$ne": deck_id}}).to_list(100)
+    
+    similar_decks = []
+    
+    for other_deck in all_decks:
+        similarity = calculate_deck_similarity(
+            deck.get('main_deck', []),
+            other_deck.get('main_deck', []),
+            deck.get('colors', []),
+            other_deck.get('colors', []),
+            deck.get('archetype', ''),
+            other_deck.get('archetype', '')
+        )
+        
+        if similarity['similarity_score'] >= 20:  # Minimum threshold
+            similar_decks.append(SimilarDeck(
+                id=other_deck['id'],
+                name=other_deck['name'],
+                colors=other_deck['colors'],
+                color_name=other_deck['color_name'],
+                archetype=other_deck['archetype'],
+                win_rate=other_deck.get('win_rate'),
+                similarity_score=similarity['similarity_score'],
+                shared_cards=similarity['shared_cards'],
+                reason=similarity['reason']
+            ))
+    
+    # Sort by similarity and return top N
+    similar_decks.sort(key=lambda x: x.similarity_score, reverse=True)
+    return similar_decks[:limit]
+
+# Notification endpoints
+@api_router.post("/notifications/register")
+async def register_for_notifications(preferences: NotificationPreferences):
+    """Register device for push notifications"""
+    # Upsert notification preferences
+    await db.notification_preferences.update_one(
+        {"user_id": preferences.user_id},
+        {"$set": preferences.dict()},
+        upsert=True
+    )
+    
+    return {"message": "Successfully registered for notifications", "user_id": preferences.user_id}
+
+@api_router.get("/notifications/preferences/{user_id}")
+async def get_notification_preferences(user_id: str):
+    """Get notification preferences for a user"""
+    prefs = await db.notification_preferences.find_one({"user_id": user_id})
+    
+    if not prefs:
+        # Return default preferences
+        return NotificationPreferences(user_id=user_id)
+    
+    return NotificationPreferences(**prefs)
+
+@api_router.put("/notifications/preferences/{user_id}")
+async def update_notification_preferences(user_id: str, preferences: NotificationPreferences):
+    """Update notification preferences"""
+    preferences.user_id = user_id
+    await db.notification_preferences.update_one(
+        {"user_id": user_id},
+        {"$set": preferences.dict()},
+        upsert=True
+    )
+    
+    return {"message": "Preferences updated successfully"}
+
+@api_router.get("/notifications/alerts/{user_id}", response_model=List[MetaAlert])
+async def get_meta_alerts(user_id: str, unread_only: bool = Query(False)):
+    """Get meta alerts for a user"""
+    query = {"user_id": user_id}
+    if unread_only:
+        query["read"] = False
+    
+    alerts = await db.meta_alerts.find(query).sort("created_at", -1).to_list(50)
+    return [MetaAlert(**alert) for alert in alerts]
+
+@api_router.post("/notifications/alerts/{alert_id}/read")
+async def mark_alert_read(alert_id: str):
+    """Mark an alert as read"""
+    result = await db.meta_alerts.update_one(
+        {"id": alert_id},
+        {"$set": {"read": True}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    
+    return {"message": "Alert marked as read"}
+
+@api_router.post("/notifications/check-meta-changes")
+async def check_meta_changes(background_tasks: BackgroundTasks):
+    """Trigger a check for meta changes and generate alerts"""
+    background_tasks.add_task(detect_meta_changes)
+    return {"message": "Meta change detection started"}
+
+async def detect_meta_changes():
+    """Background task to detect significant meta changes"""
+    try:
+        # Get current deck stats
+        decks = await db.decks.find({}).to_list(100)
+        
+        # Get previous stats snapshot
+        previous_snapshot = await db.meta_snapshots.find_one(
+            {},
+            sort=[("timestamp", -1)]
+        )
+        
+        alerts = []
+        current_timestamp = datetime.utcnow()
+        
+        for deck in decks:
+            deck_id = deck['id']
+            deck_name = deck['name']
+            current_wr = deck.get('win_rate', 0)
+            current_tier = deck.get('tier')
+            
+            if previous_snapshot:
+                prev_deck_data = previous_snapshot.get('decks', {}).get(deck_id)
+                
+                if prev_deck_data:
+                    prev_wr = prev_deck_data.get('win_rate', 0)
+                    prev_tier = prev_deck_data.get('tier')
+                    
+                    # Check for significant win rate change (>3%)
+                    if abs(current_wr - prev_wr) >= 3:
+                        direction = "increased" if current_wr > prev_wr else "decreased"
+                        alert = MetaAlert(
+                            alert_type="win_rate_change",
+                            deck_id=deck_id,
+                            deck_name=deck_name,
+                            message=f"{deck_name} win rate {direction} from {prev_wr:.1f}% to {current_wr:.1f}%",
+                            details={
+                                "previous_win_rate": prev_wr,
+                                "current_win_rate": current_wr,
+                                "change": round(current_wr - prev_wr, 1)
+                            }
+                        )
+                        alerts.append(alert)
+                    
+                    # Check for tier change
+                    if current_tier != prev_tier and current_tier and prev_tier:
+                        direction = "promoted to" if current_tier < prev_tier else "dropped to"
+                        alert = MetaAlert(
+                            alert_type="tier_change",
+                            deck_id=deck_id,
+                            deck_name=deck_name,
+                            message=f"{deck_name} {direction} Tier {current_tier}",
+                            details={
+                                "previous_tier": prev_tier,
+                                "current_tier": current_tier
+                            }
+                        )
+                        alerts.append(alert)
+                else:
+                    # New deck detected
+                    if current_tier == 1:  # Only alert for tier 1 decks
+                        alert = MetaAlert(
+                            alert_type="new_deck",
+                            deck_id=deck_id,
+                            deck_name=deck_name,
+                            message=f"New Tier 1 deck: {deck_name} ({current_wr:.1f}% WR)",
+                            details={
+                                "win_rate": current_wr,
+                                "tier": current_tier,
+                                "archetype": deck.get('archetype')
+                            }
+                        )
+                        alerts.append(alert)
+        
+        # Save alerts to database
+        if alerts:
+            # Get all users with notifications enabled
+            users = await db.notification_preferences.find({"enabled": True}).to_list(1000)
+            
+            for user in users:
+                user_id = user['user_id']
+                favorite_archetypes = set(user.get('favorite_archetypes', []))
+                min_wr = user.get('min_win_rate', 0)
+                
+                for alert in alerts:
+                    # Check if alert matches user preferences
+                    should_notify = True
+                    
+                    if favorite_archetypes:
+                        deck = await db.decks.find_one({"id": alert.deck_id})
+                        if deck and deck.get('archetype') not in favorite_archetypes:
+                            should_notify = False
+                    
+                    if alert.details.get('current_win_rate', 100) < min_wr:
+                        should_notify = False
+                    
+                    if should_notify:
+                        alert_dict = alert.dict()
+                        alert_dict['user_id'] = user_id
+                        await db.meta_alerts.insert_one(alert_dict)
+        
+        # Save current snapshot
+        snapshot = {
+            "timestamp": current_timestamp,
+            "decks": {
+                deck['id']: {
+                    "win_rate": deck.get('win_rate'),
+                    "tier": deck.get('tier'),
+                    "archetype": deck.get('archetype')
+                }
+                for deck in decks
+            }
+        }
+        await db.meta_snapshots.insert_one(snapshot)
+        
+        # Clean up old snapshots (keep last 10)
+        old_snapshots = await db.meta_snapshots.find().sort("timestamp", -1).skip(10).to_list(100)
+        if old_snapshots:
+            old_ids = [s['_id'] for s in old_snapshots]
+            await db.meta_snapshots.delete_many({"_id": {"$in": old_ids}})
+        
+        logger.info(f"Meta change detection completed. Generated {len(alerts)} alerts.")
+        
+    except Exception as e:
+        logger.error(f"Error during meta change detection: {e}")
 
 @api_router.get("/stats")
 async def get_stats():

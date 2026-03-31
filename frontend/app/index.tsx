@@ -636,6 +636,13 @@ export default function HomeScreen() {
 
         <View style={styles.headerRight}>
           <TouchableOpacity
+            style={styles.notificationButton}
+            onPress={() => router.push('/notifications')}
+          >
+            <Ionicons name="notifications" size={20} color="#fff" />
+          </TouchableOpacity>
+
+          <TouchableOpacity
             style={[styles.compareButton, compareMode && styles.compareButtonActive]}
             onPress={toggleCompareMode}
           >
@@ -791,6 +798,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#3a3a50',
     borderWidth: 1,
     borderColor: '#6366F1',
+  },
+  notificationButton: {
+    backgroundColor: '#2a2a40',
+    padding: 10,
+    borderRadius: 8,
+    marginRight: 8,
   },
   refreshButton: {
     backgroundColor: '#2a2a40',
